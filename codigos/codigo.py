@@ -123,7 +123,7 @@ def grafico_previsto_real(Y_real, previsoes, nome_arquivo='previsto_real.png'):
         ax.scatter(Y_real, y_pred, s=12, alpha=0.5)
         ax.plot([lim_min, lim_max], [lim_min, lim_max], 'r--', linewidth=1, label='Perfect prediction')
         ax.set_title(f"{nome} (R² = {r2_score(Y_real, y_pred):.4f})")
-        ax.set_xlabel('Real calories')
+        ax.set_xlabel('Actual calories')
         ax.set_xlim(lim_min, lim_max)
         ax.set_ylim(lim_min, lim_max)
         ax.set_aspect('equal', adjustable='box')
