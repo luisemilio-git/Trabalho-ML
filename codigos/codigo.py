@@ -11,22 +11,8 @@ from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import RidgeCV, LassoCV
 from sklearn.model_selection import train_test_split, KFold
-from sklearn.metrics import f1_score, mean_absolute_error, mean_squared_error, r2_score, confusion_matrix, ConfusionMatrixDisplay, precision_recall_fscore_support, accuracy_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-nomes_classes = ['Low', 'Medium', 'High']
-
-def metricas_classes(Y_real, y_pred, bins):
-    y_real_cls = pd.cut(Y_real, bins=bins, labels=nomes_classes)
-    y_pred_cls = pd.cut(y_pred, bins=bins, labels=nomes_classes)
-
-    prec, rec, f1, sup = precision_recall_fscore_support(
-        y_real_cls, y_pred_cls, labels=nomes_classes, zero_division=0
-    )
-    return {
-        'prec': prec, 'rec': rec, 'f1': f1, 'sup': sup,
-        'acc': accuracy_score(y_real_cls, y_pred_cls),
-        'f1_macro': f1.mean(),
-    }
 
 def treinar_mlp (X, Y, hidden=(64,32), lr=0.001, weight_decay=0.0, batch_size=32, epochs=200, paciencia=15, seed=42, verbose=False):
     torch.manual_seed(seed)
@@ -104,9 +90,9 @@ def prever_mlp (model, preproce, y_media, y_desvio, X):
     with torch.no_grad():
         return model(X_t).squeeze(1).numpy() * y_desvio + y_media
 
-
+# cross-validation
 def cv_mlp (X, Y, kf, **params):
-    metricas = {'rmse': [], 'mae': [], 'r2': [], 'f1': []}
+    metricas = {'rmse': [], 'mae': [], 'r2': []}
 
     for id_treino, id_aval in kf.split(X):
         X_treino = X[id_treino]
@@ -117,17 +103,37 @@ def cv_mlp (X, Y, kf, **params):
         model_fold, prep_fold, mu, sigma, _, _ = treinar_mlp(X_treino, Y_treino, **params)
         y_pred = prever_mlp(model_fold, prep_fold, mu, sigma, X_aval)
 
-        q = np.quantile(Y_treino, [1/3, 2/3])
-        bins = [-np.inf, q[0], q[1], np.inf]
-        y_aval_classe = pd.cut(Y_aval, bins=bins, labels=nomes_classes)
-        y_pred_classe = pd.cut(y_pred, bins=bins, labels=nomes_classes)
-
         metricas['rmse'].append(np.sqrt(mean_squared_error(Y_aval, y_pred)))
         metricas['mae'].append(mean_absolute_error(Y_aval, y_pred))
         metricas['r2'].append(r2_score(Y_aval, y_pred))
-        metricas['f1'].append(f1_score(y_aval_classe, y_pred_classe, average='macro', zero_division=0))
     
     return metricas
+
+def grafico_previsto_real(Y_real, previsoes, nome_arquivo='previsto_real.png'):
+    """previsoes: dict {nome_do_modelo: array de previsões}"""
+    n = len(previsoes)
+    fig, eixos = plt.subplots(1, n, figsize=(4.5 * n, 4.5), sharex=True, sharey=True)
+    if n == 1:
+        eixos = [eixos]
+
+    lim_min = min(Y_real.min(), *(p.min() for p in previsoes.values()))
+    lim_max = max(Y_real.max(), *(p.max() for p in previsoes.values()))
+
+    for ax, (nome, y_pred) in zip(eixos, previsoes.items()):
+        ax.scatter(Y_real, y_pred, s=12, alpha=0.5)
+        ax.plot([lim_min, lim_max], [lim_min, lim_max], 'r--', linewidth=1, label='Perfect prediction')
+        ax.set_title(f"{nome} (R² = {r2_score(Y_real, y_pred):.4f})")
+        ax.set_xlabel('Real calories')
+        ax.set_xlim(lim_min, lim_max)
+        ax.set_ylim(lim_min, lim_max)
+        ax.set_aspect('equal', adjustable='box')
+
+    eixos[0].set_ylabel('Predicted calories')
+    eixos[0].legend()
+    plt.tight_layout()
+    plt.savefig(nome_arquivo, bbox_inches='tight', dpi=200)
+    plt.close()
+
 
 if __name__ == "__main__":
     df = pd.read_csv('gym.csv')
@@ -148,9 +154,6 @@ if __name__ == "__main__":
     X_treino_val, X_teste, Y_treino_val, Y_teste = train_test_split(X, Y, test_size=0.20, random_state=42)
 
 
-    q = np.quantile(Y_treino_val, [1/3, 2/3])
-    bins = [-np.inf, q[0], q[1], np.inf]
-
 #--------------------------------------------------------------
 
     # Ridge e Lasso
@@ -161,11 +164,12 @@ if __name__ == "__main__":
     lasso = make_pipeline(SimpleImputer(strategy='median'), StandardScaler(), LassoCV(cv=5, random_state=42))
     lasso.fit(X_treino_val, Y_treino_val)
 
-    res_cls = {}
+    previsoes = {}
 
     # printa métricas e features
     for nome, modelo in [('Ridge', ridge), ('Lasso', lasso)]:
         y_pred = modelo.predict(X_teste)
+        previsoes[nome] = y_pred
         rmse = np.sqrt(mean_squared_error(Y_teste, y_pred))
         mae = mean_absolute_error(Y_teste, y_pred)
         r2 = r2_score(Y_teste, y_pred)
@@ -176,7 +180,6 @@ if __name__ == "__main__":
         for feat, coef in zip(X_temp.columns, modelo[-1].coef_):
             print(f"  {feat}: {coef:.4f}")
         print()
-        res_cls[nome] = metricas_classes(Y_teste, y_pred, bins)
 
 #--------------------------------------------------------------
 
@@ -198,21 +201,23 @@ if __name__ == "__main__":
         rmse_medio = np.mean(m['rmse'])
         rmse_std = np.std(m['rmse'])
         resultados.append((params, rmse_medio))
-        print(f"{params} -> RMSE {rmse_medio:.4f} ± {rmse_std:.4f} | R2 {np.mean(m['r2']):.4f} | F1 {np.mean(m['f1']):.4f}")
+        print(f"{params} -> RMSE {rmse_medio:.4f} ± {rmse_std:.4f} | R2 {np.mean(m['r2']):.4f}")
     
     melhor_params = min(resultados, key=lambda r: r[1])[0]
     print("\nBest Hyperparameters:", melhor_params)
 
     model, preproce, y_media, y_desvio, historico_loss, historico_val = treinar_mlp(X_treino_val, Y_treino_val, **melhor_params, verbose=True)
     y_pred_mlp = prever_mlp(model, preproce, y_media, y_desvio, X_teste)
-    res_cls['MLP'] = metricas_classes(Y_teste, y_pred_mlp, bins)
-
+    previsoes['MLP'] = y_pred_mlp
+    grafico_previsto_real(Y_teste, {'MLP': previsoes['MLP'],
+                                'Ridge': previsoes['Ridge'],
+                                'Lasso': previsoes['Lasso']})
 
     # Curvas de perda (treino x validação)
-    plt.plot(historico_loss, label='Treino')
-    plt.plot(historico_val, label='Validação')
-    plt.xlabel('Época')
-    plt.ylabel('MSE (alvo padronizado)')
+    plt.plot(historico_loss, label='Training')
+    plt.plot(historico_val, label='Validation')
+    plt.xlabel('Epoch')
+    plt.ylabel('MSE (standardised target)')
     plt.legend()
     plt.savefig('curva_loss.png', bbox_inches='tight')
     plt.close()
@@ -221,24 +226,25 @@ if __name__ == "__main__":
     mae_mlp = mean_absolute_error(Y_teste, y_pred_mlp)
     r2_mlp = r2_score(Y_teste, y_pred_mlp)
 
-    y_teste_classe = pd.cut(Y_teste, bins=bins, labels=nomes_classes)
-    y_pred_classe = pd.cut(y_pred_mlp, bins=bins, labels=nomes_classes)
-
-    f1_mlp = f1_score(y_teste_classe, y_pred_classe, average='macro', zero_division=0)
-
-    cm = confusion_matrix(y_teste_classe, y_pred_classe, labels=nomes_classes)
-    df_cm = pd.DataFrame(
-        cm,
-        index=[f"Real: {c}" for c in nomes_classes],
-        columns=[f"Prev: {c}" for c in nomes_classes]
-    )
-
-    # prints
     print("- MLP (PyTorch)")
-    print(f"RMSE: {rmse_mlp:.4f} | MAE: {mae_mlp:.4f} | R2: {r2_mlp:.4f} | F1: {f1_mlp:.4f}")
-    print(df_cm)
+    print(f"RMSE: {rmse_mlp:.4f} | MAE: {mae_mlp:.4f} | R2: {r2_mlp:.4f}")
 
-    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=nomes_classes)
-    disp.plot(cmap='Blues')
-    plt.savefig('matriz_confusao.png', bbox_inches='tight')
+    nomes = np.array(X_temp.columns)
+    coef_ridge = ridge[-1].coef_
+    coef_lasso = lasso[-1].coef_
+
+    # remove colunas nan e ordena pela magnitude do Ridge
+    mask = np.array([not n.endswith('_nan') for n in nomes])
+    nomes, coef_ridge, coef_lasso = nomes[mask], coef_ridge[mask], coef_lasso[mask]
+    ordem = np.argsort(np.abs(coef_ridge))
+
+    y = np.arange(len(nomes))
+    plt.figure(figsize=(7, 6))
+    plt.barh(y - 0.2, coef_ridge[ordem], height=0.4, label='Ridge')
+    plt.barh(y + 0.2, coef_lasso[ordem], height=0.4, label='Lasso')
+    plt.yticks(y, nomes[ordem])
+    plt.axvline(0, color='k', linewidth=0.8)
+    plt.xlabel('Coefficient (standardised variables)')
+    plt.legend()
+    plt.savefig('coeficientes.png', bbox_inches='tight', dpi=200)
     plt.close()
